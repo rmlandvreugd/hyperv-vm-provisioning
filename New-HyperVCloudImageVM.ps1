@@ -330,6 +330,21 @@ Switch ($ImageVersion) {
     $ImageManifestUrl = "$($ImageUrlRoot)$($ImageFileName).json"
     break
   }
+  { "alma-9", "serval" -eq $_ } {
+    $ImageOS = "AlmaLinux"
+    $ImageVersion = "9"
+    $ImageRelease = "latest" # default option is get latest but could be fixed to some specific version for example "release-20210413"
+    # https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2
+    $ImageBaseUrl = "https://repo.almalinux.org/almalinux"
+    $ImageUrlRoot = "$ImageBaseUrl/$ImageVersion/cloud/x86_64/images/"
+    $ImageFileName = "$ImageOS-$ImageVersion-GenericCloud-$ImageRelease.x86_64" # should contain "raw" version
+    $ImageFileExtension = "qcow2" # or "vhd.tar.gz" on older releases
+    # Manifest file is used for version check based on last modified HTTP header
+    # https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/CHECKSUM
+    $ImageHashFileName = "CHECKSUM"
+    $ImageHashFileType = "sha256"
+    break
+  }
   default {throw "Image version $_ is not supported."}
 }
 
@@ -581,16 +596,23 @@ $(
 # hyperv linux integration services https://poweradm.com/install-linux-integration-services-hyper-v/
 if ($ImageOS -eq "debian") {
 
-"  - hyperv-daemons"}
+"  - hyperv-daemons
+  - keyboard-configuration"}
+elseif ($ImageOS -eq "AlmaLinux") {
+"  - hyperv-daemons
+  - hyperv-tools
+  - hypervvssd
+  - hypervfcopyd
+  - hypervkvpd"}
 elseif (($ImageOS -eq "ubuntu")) {
 # azure kernel https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/Supported-Ubuntu-virtual-machines-on-Hyper-V#notes
 "  - linux-tools-virtual
   - linux-cloud-tools-virtual
-  - linux-azure"
+  - linux-azure
+  - keyboard-configuration"
 })
   - eject
   - console-setup
-  - keyboard-configuration
 
 # documented keyboard option, but not implemented ?
 # https://cloudinit.readthedocs.io/en/latest/topics/modules.html#keyboard
@@ -606,7 +628,12 @@ users:
   - default
   - name: $($GuestAdminUsername)
     no_user_group: true
-    groups: [sudo]
+$(if ($ImageOS -eq "AlmaLinux") {
+
+"    groups: [wheel]"}
+else {
+"    groups: [sudo]"}
+)
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: false
@@ -648,6 +675,7 @@ $(if ($ImageTypeAzure) { "
   - [ systemctl, disable, walinuxagent.service]
 "})  # disable cloud init on next boot (https://cloudinit.readthedocs.io/en/latest/topics/boot.html, https://askubuntu.com/a/1047618)
   - [ sh, -c, touch /etc/cloud/cloud-init.disabled ]
+$(if ($ImageOS -ne "AlmaLinux") { @"
   # set locale
   # cloud-init Bug 21.4.1: locale update prepends "LANG=" like in
   # /etc/defaults/locale set and results into error
@@ -711,6 +739,7 @@ write_files:
       echo "Disabled"
       fi
     path: /usr/libexec/hypervkvpd/hv_get_dhcp_info
+"@})
 $(if ($null -ne $network_write_files) { $network_write_files
 })
 
@@ -843,7 +872,10 @@ Write-Host -ForegroundColor Green " Done."
 
 # storage location for base images
 $ImageCachePath = Join-Path $cachePath $("CloudImage-$ImageOS-$ImageVersion")
-if (!(test-path $ImageCachePath)) {mkdir -Path $ImageCachePath | out-null}
+# if (!(test-path $ImageCachePath)) {mkdir -Path $ImageCachePath | out-null}
+if (!(Test-Path -Path $ImageCachePath -PathType Container)) {
+  New-Item -ItemType Directory -Path $ImageCachePath -Force | Out-Null
+}
 
 # Get the timestamp of the target build on the cloud-images site
 $BaseImageStampFile = join-path $ImageCachePath "baseimagetimestamp.txt"
@@ -862,6 +894,7 @@ if ($BaseImageCheckForUpdate -or ($stamp -eq '')) {
     Write-Verbose "Timestamp from web (new): $stamp"
   } catch
   {
+    $stamp = "none"
     Write-Verbose "Could not reach server: $url. We assume same timestamp: $stamp"
   }
 }
@@ -874,7 +907,11 @@ if (!(test-path "$($ImageCachePath)\$($ImageOS)-$($stamp).$($ImageFileExtension)
     # If we do not have a matching image - delete the old ones and download the new one
     Write-Verbose "Did not find: $($ImageCachePath)\$($ImageOS)-$($stamp).$($ImageFileExtension)"
     Write-Host 'Removing old images from cache...' -NoNewline
+    # FIXME: this might delete the dir
     Remove-Item "$($ImageCachePath)" -Exclude 'baseimagetimestamp.txt',"$($ImageOS)-$($stamp).*" -Recurse -Force
+    if (!(Test-Path -Path $ImageCachePath -PathType Container)) {
+      New-Item -ItemType Directory -Path $ImageCachePath -Force | Out-Null
+    }
     Write-Host -ForegroundColor Green " Done."
 
     # get headers for content length
@@ -913,6 +950,9 @@ if (!(test-path "$($ImageCachePath)\$($ImageOS)-$($stamp).$($ImageFileExtension)
       '*SHA512*' {
         $fileHash = Get-FileHash "$($ImageCachePath)\$($ImageOS)-$($stamp).$($ImageFileExtension)" -Algorithm SHA512
       }
+      '*CHECKSUM*' {
+        $fileHash = Get-FileHash "$($ImageCachePath)\$($ImageOS)-$($stamp).$($ImageFileExtension)" -Algorithm $ImageHashFileType
+      }
       default {throw "$ImageHashPath not supported."}
     }
     if (($hashSums | Select-String -pattern $fileHash.Hash -SimpleMatch).Count -eq 0) {throw "File hash check failed"}
@@ -946,13 +986,15 @@ if (!(test-path "$($ImageCachePath)\$($ImageOS)-$($stamp).vhd")) {
         -RedirectStandardOutput "$($tempPath)\bsdtar.log"
     } elseif ($ImageFileExtension.EndsWith("img")) {
       Write-Verbose 'No need for archive extracting'
+    } elseif ($ImageFileExtension.EndsWith("qcow2")) {
+      Write-Verbose 'No need for archive extracting'
     } else {
       Write-Warning "Unsupported image in archive"
       exit 1
     }
 
     # rename bionic-server-cloudimg-amd64.vhd (or however they pack it) to $ImageFileName.vhd
-    $fileExpanded = Get-ChildItem "$($ImageCachePath)\*.vhd","$($ImageCachePath)\*.vhdx","$($ImageCachePath)\*.raw","$($ImageCachePath)\*.img" -File | Sort-Object LastWriteTime | Select-Object -last 1
+    $fileExpanded = Get-ChildItem "$($ImageCachePath)\*.vhd","$($ImageCachePath)\*.vhdx","$($ImageCachePath)\*.raw","$($ImageCachePath)\*.img","$($ImageCachePath)\*.qcow2" -File | Sort-Object LastWriteTime | Select-Object -last 1
     Write-Verbose "Expanded file name: $fileExpanded"
     if ($fileExpanded -like "*.vhd") {
       Rename-Item -path $fileExpanded -newname "$ImageFileName.vhd"
@@ -972,6 +1014,14 @@ if (!(test-path "$($ImageCachePath)\$($ImageOS)-$($stamp).vhd")) {
       & $qemuImgPath convert -f qcow2 "$fileExpanded" -O vpc "$($ImageCachePath)\$($ImageFileName).vhd"
       # remove source image after conversion
       Remove-Item "$fileExpanded" -force
+    } elseif ($fileExpanded -like "*.qcow2") {
+      Write-Host "qemu-img info for source untouched cloud image: "
+      & $qemuImgPath info "$fileExpanded"
+      Write-Verbose "qemu-img convert to vhd"
+      Write-Verbose "$qemuImgPath convert -f qcow2 $fileExpanded -O vpc $($ImageCachePath)\$ImageFileName.vhd"
+      & $qemuImgPath convert -f qcow2 "$fileExpanded" -O vpc "$($ImageCachePath)\$($ImageFileName).vhd"
+      # remove source image after conversion
+      # Remove-Item "$fileExpanded" -force
     } else {
       Write-Warning "Unsupported disk image extracted."
       exit 1
