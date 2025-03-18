@@ -330,6 +330,21 @@ Switch ($ImageVersion) {
     $ImageManifestUrl = "$($ImageUrlRoot)$($ImageFileName).json"
     break
   }
+  { "alma-8", "leopard" -eq $_ } {
+    $ImageOS = "AlmaLinux"
+    $ImageVersion = "8"
+    $ImageRelease = "UEFI-latest" # default option is get latest but could be fixed to some specific version for example "release-20210413"
+    # https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-UEFI-latest.x86_64.qcow2
+    $ImageBaseUrl = "https://repo.almalinux.org/almalinux"
+    $ImageUrlRoot = "$ImageBaseUrl/$ImageVersion/cloud/x86_64/images/"
+    $ImageFileName = "$ImageOS-$ImageVersion-GenericCloud-$ImageRelease.x86_64" # should contain "raw" version
+    $ImageFileExtension = "qcow2" # or "vhd.tar.gz" on older releases
+    # Manifest file is used for version check based on last modified HTTP header
+    # https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/CHECKSUM
+    $ImageHashFileName = "CHECKSUM"
+    $ImageHashFileType = "sha256"
+    break
+  }
   { "alma-9", "serval" -eq $_ } {
     $ImageOS = "AlmaLinux"
     $ImageVersion = "9"
